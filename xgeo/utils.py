@@ -91,29 +91,104 @@ def get_rio_profile(da, xdim='lon', ydim='lat'):
     )
     return profile
 
-def set_crs(ds, crs, crs_attr_name='crs'):
+def set_crs(da, crs, crs_attr_name='crs'):
     "translates rasterio crs to cf1.6 confention attributes"
     # TODO: complete list from https://cf-pcmdi.llnl.gov/trac/wiki/Cf2CrsWkt
+    crs = _check_crs(crs)
     if crs.is_epsg_code:
         epsg = int(crs.get('init').split(':')[-1])
     else:
         epsg = None
     if epsg == 4326:
         grid_mapping_name = 'latitude_longitude'
-        
+    if crs_attr_name not in [v for v in da.coords.keys()]:
+        da[crs_attr_name] = xr.Variable([], None)
+        # if dataset, make crs part of the coordinates. this is automatic if dataaraay
+        if hasattr(da, 'set_coords'): 
+            da = da.set_coords([crs_attr_name])
     crs_dict = dict(long_name = 'CRS definition',
                     grid_mapping_name = grid_mapping_name,
                     proj4 = crs.to_string())
-    ds[crs_attr_name] = crs_dict
+    da[crs_attr_name].attrs = crs_dict
+    return da
 
-def get_crs(ds, crs_attr_name='crs'):
-    crs_dict = ds[crs_attr_name].attrs
-    proj4 = getattr(crs_dict, 'proj4', None)
-    if proj4:
-        crs = rasterio.crs.CRS.from_string(proj4)
+def get_crs(da, crs_attr_name='crs'):
+    names = ['proj4', 'wkt', 'epsg']
+    _crs = getattr(da, crs_attr_name, None)
+    if _crs is not None:
+        for n in names:
+            if n in _crs.attrs.keys():
+                try:
+                    crs = _check_crs(_crs.attrs[n])
+                    if crs:
+                        break
+                except ValueError:
+                    pass
+        if not crs:
+            raise ValueError('not valid crs found of types {}'.format(', '.join(names)))
     else:
-        raise ValueError('no proj4 string found in dataset')
+        raise ValueError('dim {} not found in dataset'.format(crs_attr_name))
     return crs
+
+# internal
+def _check_crs(crs):
+    if isinstance(crs, rasterio.crs.CRS):
+        pass
+    elif isinstance(crs, dict):
+        crs = rasterio.crs.CRS(**crs)
+    elif isinstance(crs, int):
+        crs = rasterio.crs.CRS.from_epsg(crs)
+    elif isinstance(crs, str):
+        if crs.startswith('+'):
+            crs = rasterio.crs.CRS.from_string(crs)
+        else:
+            crs = rasterio.crs.CRS.from_wkt(crs)
+    else:
+        crs = None
+    return crs 
+
+def _prepare_dataarray(name, shape, transform, crs=4326, zcoords=None,
+                  dims=['time', 'lat', 'lon'], dtype=np.float32):
+    """
+    Prepares destination DataArray for reprojection.
+    """
+    assert len(shape) == len(dims), "shape and dims do should have equal length"
+    height, width = shape[-2:]
+    ydim, xdim = dims[-2:]
+    # create coords
+    # from: http://xarray.pydata.org/en/stable/generated/xarray.open_rasterio.html
+    x, y = (
+        np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5)
+        * transform
+    )
+    coords = {ydim: y[:, 0], xdim: x[0, :]}
+
+    # add third dimension 
+    if len(shape) == 3:
+        if zcoords is None:
+            zcoords = np.arange(dims[0])
+        coords.update({dims[0]: zcoords})
+
+    # create dataarray
+    dst = xr.DataArray(
+        data=np.empty(shape, dtype),
+        coords=coords,
+        dims=dims,
+    )
+    dst = set_crs(dst, crs)
+    return dst
+
+def _check_dims(da, xdim='lon', ydim='lat', zdim=None):
+    assert (da.ndim >= 2) & (da.ndim <= 3), "dataarray should have 2 or 3 dimensions"
+    dims = [ydim, xdim]
+    if zdim:
+        dims = [zdim] + dims
+    elif da.ndim == 3:
+        dims = [d for d in da.dims if d not in dims] + dims
+    assert np.all([dim in da.dims for dim in dims]), "not all dimensions found in DataArray"
+    assert da.ndim == len(dims), "DataArray has more dimension than {:d} dimensions".format(len(dims))
+    da = da.transpose(*tuple(dims)) # order of dimensions is z,y,x
+    return da, dims
 
 # formatter 
 def pcr_mapstack_formatter(i, prefix, **kwargs):
