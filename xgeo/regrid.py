@@ -8,7 +8,11 @@ from xgeo import utils
 def clip(da, bounds, xdim='lon', ydim='lat'):
     """clip a dataarray with spatial extent"""
     xmin, ymin, xmax, ymax = bounds
-    return da.sel({ydim:slice(ymin, ymax), xdim:slice(xmax, xmin)})
+    dy = np.diff(da[ydim].values)[0]
+    yslice = slice(ymax, ymin) if dy < 0 else slice(ymin, ymax)
+    dx = np.diff(da[xdim].values)[0]
+    xslice = slice(xmax, xmin) if dx < 0 else slice(xmin, xmax)
+    return da.sel({ydim:yslice, xdim:xslice})
 
 def flipdim(da, dim='lat'):
     """flip a dataarray at <dim>. dafault along latitutde axis"""
