@@ -7,6 +7,7 @@ import rasterio
 import rasterio.warp
 from pathlib import Path
 from os.path import basename, dirname, join
+import os
 
 from xgeo import utils, regrid
 
@@ -57,18 +58,21 @@ def to_mapstack(da, out_dir, formatter=utils.pcr_mapstack_formatter, prefix=None
         if like or (dst_crs and dst_crs != src_crs):
             reproject_kwargs.update(src_crs=src_crs, xdim=xdim, ydim=ydim)
             reproject_kwargs = regrid.get_reproject_kwargs(da, **reproject_kwargs)
+        print(reproject_kwargs)
 
     # write data
     prefix = prefix if prefix else da.name
     for i, z in enumerate(da[zdim].values):
         fn = join(out_dir, formatter(i=i, z=z, prefix=prefix))
-        _write_raster(da, fn, **kwargs)
+        _write_raster(da.sel(**{zdim: z}), fn, reproject_kwargs=reproject_kwargs, **kwargs)
 
 
 # internal functions
 
 def _write_raster(da, path, reproject_kwargs={}, **kwargs):
     """write prepared xarray DataArray to gdal type. All properties must be set in kwargs"""
+    # make data 3D for consistency
+    data = da.data[None, :, :] if kwargs['count'] == 1 else da.data # make sure data has 3 dims
     # update creation options
     reproject = len(reproject_kwargs.keys()) > 0
     if reproject:
@@ -86,32 +90,34 @@ def _write_raster(da, path, reproject_kwargs={}, **kwargs):
         if ('blockysize' in kwargs and
                 kwargs['height'] < kwargs['blockysize']):
             del kwargs['blockysize']
+        
+        # regrid
+        data_out = np.zeros((kwargs['count'], kwargs['width'], kwargs['height']), dtype=kwargs['dtype'])
+        rasterio.warp.reproject(
+            source=data,
+            destination=data,
+            **reproject_kwargs
+        )
+        data = data_out
 
     # write data
     with rasterio.Env():
         with rasterio.open(path, "w", **kwargs) as dst:
-            data = da.data if kwargs['count'] == 1 else da.data[None, :, :] # make sure data has 3 dims
-            if reproject:
-                rasterio.warp.reproject(
-                        source=data,
-                        destination=rasterio.band(dst, list(range(kwargs['count']))),
-                        **reproject_kwargs
-                    )
-            else:
-                for i in range(kwargs['count']):
-                    if getattr(kwargs, 'tiled', None) == 'yes':
-                        for _, window in dst.block_windows():
-                            row_slice, col_slice = window.toslices()
-                            data_wdw = np.array(data[i, row_slice, col_slice])
-                            dst.write(data_wdw, i+1, window=window)
-                    else:
-                        dst.write(np.array(data[i, :, :]), i+1) 
+            for i in range(kwargs['count']):
+                if getattr(kwargs, 'tiled', None) == 'yes':
+                    for _, window in dst.block_windows():
+                        row_slice, col_slice = window.toslices()
+                        data_wdw = np.array(data[i, row_slice, col_slice])
+                        dst.write(data_wdw, i+1, window=window)
+                else:
+                    dst.write(np.array(data[i, :, :]), i+1) 
+    if os.path.isfile(path + 'aux.xml'):
+        os.unlink(os.path.isfile(path + 'aux.xml'))
 
 def _prep_da_to_raster(da, driver, nodata, force_NtoS,
              xdim, ydim, zdim, chunks, **kwargs):   
-    # check dimensions
-    dims = _check_dims(da, xdim=xdim, ydim=ydim, zdim=zdim)
-    da = da.transpose(*tuple(dims)) # order of dimensions is z,y,x
+    # check and reorder dimensions
+    da, _ = utils._check_dims(da, xdim=xdim, ydim=ydim, zdim=zdim)
     
     # make sure orientation of raster is North to South
     dy = np.diff(da[ydim].values)[0]
@@ -138,13 +144,7 @@ def _prep_da_to_raster(da, driver, nodata, force_NtoS,
 
     return da, kwargs
 
-def _check_dims(da, xdim='lon', ydim='lat', zdim=None):
-    dims = [ydim, xdim]
-    if zdim:
-        dims = [zdim] + dims
-    assert np.all([dim in da.dims for dim in dims]), "not all dimensions found in DataArray"
-    assert da.ndim == len(dims), "DataArray has more dimension than {:d} dimensions".format(len(dims))
-    return dims
+
 
 def _driver_from_ext(fn):
     assert isinstance(fn, str), "file name fn should be of string type"
