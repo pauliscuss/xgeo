@@ -5,14 +5,18 @@ import affine
 from rasterio.warp import Resampling
 from xgeo import utils
 
-def clip(da, xlim, ylim, xdim='lon', ydim='lat'):
-    return da.sel({ydim:slice(ylim[0], ylim[1]), xdim:slice(xlim[0], xlim[1])})
+def clip(da, bounds, xdim='lon', ydim='lat'):
+    """clip a dataarray with spatial extent"""
+    xmin, ymin, xmax, ymax = bounds
+    return da.sel({ydim:slice(ymin, ymax), xdim:slice(xmax, xmin)})
 
 def flipdim(da, dim='lat'):
-    "flip axis along dim. dafault along latitutde y-axis"
+    """flip a dataarray at <dim>. dafault along latitutde axis"""
     return da.sel(**{dim:slice(None, None, -1)})
 
-def get_reproject_kwargs(da, resampling, like=None, dst_crs=None, src_crs=None, xdim='lon', ydim='lat', reproject_kwargs={}):
+def get_reproject_kwargs(da, resampling, like=None, dst_crs=None, src_crs=None, 
+    xdim='lon', ydim='lat', reproject_kwargs={}):
+    """get destination crs, transform, height and width based on <like> raster or given <dst_crs>"""
     assert like or dst_crs, "either like or dst_crs should be provided"
     resampling_methods = {e.name: e for e in Resampling}
     if isinstance(resampling, str):
@@ -48,31 +52,29 @@ def get_reproject_kwargs(da, resampling, like=None, dst_crs=None, src_crs=None, 
     )
     return reproject_kwargs
 
-
-    # # prepare output grid
-    # dst_da = _prepare_grid(dst_transform, dst_width, dst_height, xdim=xdim, ydim=ydim, dtype=da.dtype)
+def reproject_rasterio(da, resampling, like=None, dst_crs=None, src_crs=None, 
+    xdim='lon', ydim='lat', reproject_kwargs={}):
+    """reproject xarray dataarray using rasterio warp functionality"""
+    # check and reorder dimensions
+    da, dims = utils._check_dims(da, xdim=xdim, ydim=ydim)
     
-    # # warp
-    # rasterio.warp.reproject(
-    #     source=da.values,
-    #     destination=dst_da.values,
-    #     **reproject_kwargs,
-    # )
+    # get reproject kwargs 
+    reproject_kwargs = get_reproject_kwargs(da, resampling, like=like, dst_crs=dst_crs, src_crs=src_crs, 
+        xdim=xdim, ydim=ydim, reproject_kwargs=reproject_kwargs)
 
-    # return dst_da
+    # prepare output grid
+    dst_shape = [da[da.dims[0]].size] if len(dims) == 3 else []
+    zcoords = da[da.dims[0]].values if len(dims) == 3 else None
+    dst_shape = tuple(dst_shape + [reproject_kwargs['dst_height'], reproject_kwargs['dst_width']])
+    dst_da = utils._prepare_dataarray(name=da.name, shape=dst_shape, transform=reproject_kwargs['dst_transform'],  
+        crs=reproject_kwargs['dst_crs'], zcoords=zcoords, dims=dims, dtype=da.dtype)
+    
+    # warp
+    rasterio.warp.reproject(
+        source=da.values,
+        destination=dst_da.values,
+        **reproject_kwargs,
+    )
 
-def _prepare_grid(dst_transform, dst_width, dst_height, xdim='lon', ydim='lat', dtype=np.float32):
-    """
-    Prepares destination DataArray for reprojection.
-    """
-    # from: http://xarray.pydata.org/en/stable/generated/xarray.open_rasterio.html
-    x, y = (
-        np.meshgrid(np.arange(dst_width) + 0.5, np.arange(dst_height) + 0.5)
-        * dst_transform
-    )
-    dst = xr.DataArray(
-        data=np.empty((dst_height, dst_width), dtype),
-        coords={ydim: y[:, 0], xdim: x[0, :]},
-        dims=(ydim, xdim),
-    )
-    return dst
+    return dst_da
+
